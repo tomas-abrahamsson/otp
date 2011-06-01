@@ -122,6 +122,7 @@ noenv_output_generated(Opts) ->
 %%
 
 -define(pass(P), {P,fun P/1}).
+-define(pass(P,C), {P,fun C/1,fun P/1}).
 
 env_default_opts() ->
     Key = "ERL_COMPILER_OPTIONS",
@@ -304,7 +305,7 @@ run_tc({Name,Fun}, St) ->
     Val.
 
 comp_ret_ok(#compile{code=Code,warnings=Warn0,module=Mod,options=Opts}=St) ->
-    case member(warnings_as_errors, Opts) andalso length(Warn0) > 0 of
+    case werr(St) of
         true ->
             case member(report_warnings, Opts) of
                 true ->
@@ -338,6 +339,11 @@ comp_ret_err(#compile{warnings=Warn0,errors=Err0,options=Opts}=St) ->
 	true -> {error,Err,Warn};
 	false -> error
     end.
+
+not_werr(St) -> not werr(St).
+
+werr(#compile{options=Opts, warnings=Ws}) ->
+    member(warnings_as_errors, Opts) andalso length(Ws) > 0.
 
 %% messages_per_file([{File,[Message]}]) -> [{File,[Message]}]
 messages_per_file(Ms) ->
@@ -655,7 +661,7 @@ asm_passes() ->
 
 binary_passes() ->
     [{native_compile,fun test_native/1,fun native_compile/1},
-     {unless,binary,?pass(save_binary)}].
+     {unless,binary,?pass(save_binary,not_werr)}].
 
 %%%
 %%% Compiler passes.
