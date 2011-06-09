@@ -469,6 +469,20 @@ start(Procs) ->
 %%       supervisor module, we should load the new version, and then
 %%       delete the old.  Then we should perform the start changes
 %%       manually, by adding/deleting children.
+%%
+%%       Recent changes to this code cause the upgrade to skip over
+%%       the case where a suspended supervisor has which_children
+%%       called against it, returning an empty list rather than
+%%       timing out and causing a VM restart to the *old* version of
+%%       a release. Additionally an error is logged stating the error
+%%       case occurred.
+%%
+%%       A second case where this can occur is if a child spec is
+%%       incorrect and get_modules is called against a process that
+%%       can't respond to the gen:call. Again an empty list is returned
+%%       rather than an timeout and VM restart. Additionally an error
+%%       is logged stating the error case occurred.
+%%
 %% Returns: [{SuperPid, ChildName, ChildPid, Mods}]
 %%-----------------------------------------------------------------
 %% OTP-3452. For each application the first item contains the pid
@@ -478,47 +492,69 @@ start(Procs) ->
 get_supervised_procs() ->
     lists:foldl(
       fun(Application, Procs) ->
-	      case application_controller:get_master(Application) of
-		  Pid when is_pid(Pid) ->
-		      {Root, _AppMod} = application_master:get_child(Pid),
-		      case get_supervisor_module(Root) of
-			  {ok, SupMod} ->
-			      get_procs(supervisor:which_children(Root), 
-					Root) ++
-				  [{undefined, undefined, Root, [SupMod]} | 
-				   Procs];
-			  {error, _} ->
-			      error_logger:error_msg("release_handler: "
-						     "cannot find top "
-						     "supervisor for "
-						    "application ~w~n", 
-						    [Application]),
-			      get_procs(supervisor:which_children(Root), 
-					Root) ++ Procs
-		      end;
-		  _ -> Procs
-	      end
+              get_master_procs(Application,
+                               Procs,
+                               application_controller:get_master(Application))
       end,
       [],
-      lists:map(fun({Application, _Name, _Vsn}) ->
-			Application
-		end,
-		application:which_applications())).
+      get_application_names()).
+
+get_supervised_procs(_, Root, Procs, {ok, SupMod}) ->
+    get_procs(maybe_supervisor_which_children(get_proc_state(Root), Root), Root) ++
+        [{undefined, undefined, Root, [SupMod]} |  Procs];
+get_supervised_procs(Application, Root, Procs, {error, _}) ->
+    error_logger:error_msg("release_handler: cannot find top supervisor for "
+                           "application ~w~n", [Application]),
+    get_procs(maybe_supervisor_which_children(get_proc_state(Root), Root), Root) ++ Procs.
+
+get_application_names() ->
+    lists:map(fun({Application, _Name, _Vsn}) ->
+                      Application
+              end,
+              application:which_applications()).
+
+get_master_procs(Application, Procs, Pid) when is_pid(Pid) ->
+    {Root, _AppMod} = application_master:get_child(Pid),
+    get_supervised_procs(Application, Root, Procs, get_supervisor_module(Root));
+get_master_procs(_, Procs, _) ->
+    Procs.
 
 get_procs([{Name, Pid, worker, dynamic} | T], Sup) when is_pid(Pid) ->
-    Mods = get_dynamic_mods(Pid),
+    Mods = maybe_get_dynamic_mods(get_proc_initial_call_mod(Pid), Pid),
     [{Sup, Name, Pid, Mods} | get_procs(T, Sup)];
 get_procs([{Name, Pid, worker, Mods} | T], Sup) when is_pid(Pid), is_list(Mods) ->
     [{Sup, Name, Pid, Mods} | get_procs(T, Sup)];
 get_procs([{Name, Pid, supervisor, Mods} | T], Sup) when is_pid(Pid) ->
-    [{Sup, Name, Pid, Mods} | get_procs(T, Sup)] ++ 
-	get_procs(supervisor:which_children(Pid), Pid);
+    [{Sup, Name, Pid, Mods} | get_procs(T, Sup)] ++
+        get_procs(maybe_supervisor_which_children(get_proc_state(Pid), Pid), Pid);
 get_procs([_H | T], Sup) ->
     get_procs(T, Sup);
 get_procs(_, _Sup) ->
     [].
 
-get_dynamic_mods(Pid) ->
+get_proc_state(Proc) ->
+    {status, _, {module, _}, [_, State, _, _, _]} = sys:get_status(Proc),
+    State.
+
+get_proc_initial_call_mod(Proc) ->
+    {status, _, {module, _}, [List, _, _, _, _]} = sys:get_status(Proc),
+    {Mod, _, _} = proplists:get_value('$initial_call', List),
+    Mod.
+
+maybe_supervisor_which_children(suspended, Pid) ->
+    error_logger:error_msg("release_handler: supervisor ~p is suspended,"
+                           " cannot query children~n", [Pid]),
+    [];
+maybe_supervisor_which_children(_, Pid) ->
+    supervisor:which_children(Pid).
+
+maybe_get_dynamic_mods(supervisor, Pid) ->
+    error_logger:error_msg("release_handler: ~p is a supervisor"
+                           " but is specified as a worker,"
+                           " there is likely an issue with your"
+                           " childspec~n", [Pid]),
+    [];
+maybe_get_dynamic_mods(_, Pid) ->
     {ok,Res} = gen:call(Pid, self(), get_modules),
     Res.
 
