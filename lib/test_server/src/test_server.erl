@@ -1219,7 +1219,7 @@ do_end_tc_call(M,F,Res,Return) ->
 	    end;
 	Other ->
 	    case test_server_sup:framework_call(
-		   end_tc, [Other,F,Res], Ref) of
+		   Other, end_tc, [M,F,Res], Ref) of
 		{fail,FWReason} ->
 		    {failed,FWReason};
 		_Else ->
